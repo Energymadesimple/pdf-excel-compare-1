@@ -1,0 +1,87 @@
+import streamlit as st
+import pandas as pd
+import pdfplumber
+from difflib import HtmlDiff
+import tempfile
+
+# --- Helper functions ---
+def extract_pdf_text_and_tables(pdf_file):
+    all_text, all_tables = [], []
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            all_text.append(page.extract_text() or "")
+            tables = page.extract_tables()
+            for t in tables:
+                df = pd.DataFrame(t[1:], columns=t[0]) if len(t) > 1 else pd.DataFrame(t)
+                all_tables.append(df)
+    combined_text = "\n".join(all_text)
+    combined_data = pd.concat(all_tables, ignore_index=True) if all_tables else pd.DataFrame()
+    return combined_text, combined_data
+
+def compare_dataframes(df1, df2):
+    diffs = []
+    shared_cols = set(df1.columns).intersection(set(df2.columns))
+    for col in shared_cols:
+        s1 = df1[col].astype(str).fillna("")
+        s2 = df2[col].astype(str).fillna("")
+        if not s1.equals(s2):
+            mismatches = pd.DataFrame({
+                "Excel": s1,
+                "PDF": s2
+            }).loc[s1 != s2]
+            mismatches["Column"] = col
+            diffs.append(mismatches)
+    if diffs:
+        return pd.concat(diffs)
+    return pd.DataFrame()
+
+def make_html_diff(text1, text2):
+    diff = HtmlDiff(wrapcolumn=80)
+    html = diff.make_file(text1.splitlines(), text2.splitlines(),
+                          fromdesc="PDF Text", todesc="Excel Text")
+    return html
+
+# --- Streamlit UI ---
+st.set_page_config(page_title="PDF vs Excel Comparator", layout="wide")
+st.title("📄 PDF and Excel Comparison Tool")
+
+st.write("Upload a PDF and an Excel file to compare both **data** and **text**.")
+
+pdf_file = st.file_uploader("Upload PDF file", type=["pdf"])
+excel_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
+
+if pdf_file and excel_file:
+    if st.button("🔍 Compare Files"):
+        with st.spinner("Extracting and comparing... Please wait..."):
+            # Extract PDF content
+            pdf_text, pdf_data = extract_pdf_text_and_tables(pdf_file)
+
+            # Read Excel
+            excel_data = pd.read_excel(excel_file)
+            excel_text = "\n".join(excel_data.astype(str).fillna("").values.flatten())
+
+            # Compare Data
+            data_diff = compare_dataframes(excel_data, pdf_data)
+
+            # Compare Text
+            html_diff = make_html_diff(pdf_text, excel_text)
+            temp_html = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
+            with open(temp_html.name, "w", encoding="utf-8") as f:
+                f.write(html_diff)
+
+        st.success("✅ Comparison complete!")
+
+        # --- Display Results ---
+        st.subheader("🧮 Data Differences")
+        if not data_diff.empty:
+            st.dataframe(data_diff, use_container_width=True)
+            csv = data_diff.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download Data Differences (CSV)", data=csv, file_name="data_diff_report.csv")
+        else:
+            st.info("No data mismatches found between PDF and Excel.")
+
+        st.subheader("🧾 Text Differences (HTML)")
+        st.markdown("Differences are shown in color — red for deletions, green for additions.")
+        st.markdown(f'<iframe src="file://{temp_html.name}" width="100%" height="600px"></iframe>', unsafe_allow_html=True)
+else:
+    st.info("Please upload both a PDF and an Excel file to begin.")
